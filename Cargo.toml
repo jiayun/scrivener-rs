@@ -1,12 +1,13 @@
 [package]
 name = "scrivener"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Rust library for reading and writing Scrivener 3 projects"
 repository = "https://github.com/jiayun/scrivener-rs"
 keywords = ["scrivener", "writing", "project", "xml"]
 categories = ["parser-implementations", "text-processing"]
+readme = "README.md"
 
 [dependencies]
 scrivener-rtf = "0.1"
