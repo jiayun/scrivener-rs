@@ -65,7 +65,7 @@ fn write_synopsis() {
     let synopsis_path = project_dir
         .join("Files")
         .join("Data")
-        .join(uuid.to_string())
+        .join(uuid.to_string().to_uppercase())
         .join("synopsis.txt");
     assert!(synopsis_path.exists());
     assert_eq!(
