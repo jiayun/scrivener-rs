@@ -30,6 +30,31 @@ impl Default for Document {
     }
 }
 
+/// The type of folder in the Scrivener binder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderType {
+    /// Normal user-created folder.
+    Folder,
+    /// The top-level Draft (Manuscript) folder.
+    DraftFolder,
+    /// The top-level Research folder.
+    ResearchFolder,
+    /// The Trash folder (handled separately, but tracked for serialization).
+    TrashFolder,
+}
+
+impl FolderType {
+    /// Returns the XML `Type` attribute value for this folder type.
+    pub fn as_xml_type(&self) -> &'static str {
+        match self {
+            FolderType::Folder => "Folder",
+            FolderType::DraftFolder => "DraftFolder",
+            FolderType::ResearchFolder => "ResearchFolder",
+            FolderType::TrashFolder => "TrashFolder",
+        }
+    }
+}
+
 /// A folder in the binder that can contain child items.
 #[derive(Debug, Clone)]
 pub struct Folder {
@@ -37,6 +62,8 @@ pub struct Folder {
     pub title: String,
     pub children: Vec<crate::binder::BinderItem>,
     pub metadata: DocumentMetadata,
+    /// The original folder type from the scrivx XML.
+    pub folder_type: FolderType,
 }
 
 impl Default for Folder {
@@ -46,6 +73,7 @@ impl Default for Folder {
             title: String::new(),
             children: Vec::new(),
             metadata: DocumentMetadata::default(),
+            folder_type: FolderType::Folder,
         }
     }
 }
@@ -92,20 +120,85 @@ pub(crate) fn extract_plain_text(doc: &scrivener_rtf::Document) -> String {
     text
 }
 
-fn extract_text_from_group(group: &scrivener_rtf::Group, text: &mut String) {
+/// Header control words whose groups should be skipped during text extraction.
+const HEADER_DESTINATIONS: &[&str] = &[
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "listtable",
+    "listoverridetable",
+    "info",
+    "generator",
+    "expandedcolortbl",
+];
+
+/// Check if a group is a known header/destination group that should be skipped.
+fn is_header_group(group: &scrivener_rtf::Group) -> bool {
     if group.is_destination {
+        return true;
+    }
+    // Check if the first content item is a header control word
+    matches!(
+        group.content.first(),
+        Some(scrivener_rtf::Content::ControlWord(name, _))
+            if HEADER_DESTINATIONS.iter().any(|h| h == name)
+    )
+}
+
+fn extract_text_from_group(group: &scrivener_rtf::Group, text: &mut String) {
+    if is_header_group(group) {
         return;
     }
+    let mut skip_next_text = false;
+    let mut pending_high_surrogate: Option<u16> = None;
     for content in &group.content {
         match content {
-            scrivener_rtf::Content::Text(s) => text.push_str(s),
+            scrivener_rtf::Content::Text(s) => {
+                if skip_next_text {
+                    skip_next_text = false;
+                    // Skip the first char (ANSI fallback '?' after \uN)
+                    if s.len() > 1 {
+                        text.push_str(&s[1..]);
+                    }
+                } else {
+                    text.push_str(s);
+                }
+            }
+            scrivener_rtf::Content::ControlWord(name, Some(code)) if name == "u" => {
+                let code = *code;
+                let unsigned = if code < 0 { (code + 0x10000) as u16 } else { code as u16 };
+
+                if (0xD800..=0xDBFF).contains(&unsigned) {
+                    // High surrogate — store and wait for low surrogate
+                    pending_high_surrogate = Some(unsigned);
+                } else if (0xDC00..=0xDFFF).contains(&unsigned) {
+                    // Low surrogate — combine with pending high surrogate
+                    if let Some(hi) = pending_high_surrogate.take() {
+                        let code_point =
+                            ((hi as u32 - 0xD800) << 10) + (unsigned as u32 - 0xDC00) + 0x10000;
+                        if let Some(c) = char::from_u32(code_point) {
+                            text.push(c);
+                        }
+                    }
+                } else {
+                    pending_high_surrogate = None;
+                    if let Some(c) = char::from_u32(unsigned as u32) {
+                        text.push(c);
+                    }
+                }
+                skip_next_text = true;
+            }
             scrivener_rtf::Content::ControlWord(name, _) if name == "par" => {
                 text.push('\n');
+                skip_next_text = false;
             }
             scrivener_rtf::Content::Group(sub) => {
                 extract_text_from_group(sub, text);
+                skip_next_text = false;
             }
-            _ => {}
+            _ => {
+                skip_next_text = false;
+            }
         }
     }
 }
@@ -115,15 +208,38 @@ pub(crate) fn count_words(text: &str) -> usize {
 }
 
 fn generate_rtf_from_text(text: &str) -> String {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('{', "\\{")
-        .replace('}', "\\}");
-    let body = escaped.replace('\n', "\\par\n");
+    let mut body = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' => body.push_str("\\\\"),
+            '{' => body.push_str("\\{"),
+            '}' => body.push_str("\\}"),
+            '\n' => body.push_str("\\par\n"),
+            c if c as u32 > 127 => {
+                let code_point = c as u32;
+                if code_point > 0xFFFF {
+                    // Supplementary plane → UTF-16 surrogate pair
+                    let adjusted = code_point - 0x10000;
+                    let high = (0xD800 + (adjusted >> 10)) as i16;
+                    let low = (0xDC00 + (adjusted & 0x3FF)) as i16;
+                    body.push_str(&format!("\\u{}?\\u{}?", high, low));
+                } else {
+                    // BMP: i16 wrapping handles values > 0x7FFF per RTF spec
+                    body.push_str(&format!("\\u{}?", code_point as i16));
+                }
+            }
+            c => body.push(c),
+        }
+    }
     format!(
-        "{{\\rtf1\\ansi\\deff0{{\\fonttbl{{\\f0\\fnil Helvetica;}}}}\n\\pard\\f0\\fs24 {}\\par}}",
+        "{{\\rtf1\\ansi\\ansicpg1252\\deff0{{\\fonttbl{{\\f0\\fnil Helvetica;}}}}\n\\pard\\f0\\fs24 {}\\par}}",
         body
     )
+}
+
+/// Returns the uppercase UUID string for use in file paths (matches Scrivener convention).
+fn data_dir_name(uuid: &Uuid) -> String {
+    uuid.to_string().to_uppercase()
 }
 
 // -- Document methods --
@@ -133,7 +249,7 @@ impl Document {
         let rtf_path = project_path
             .join("Files")
             .join("Data")
-            .join(self.uuid.to_string())
+            .join(data_dir_name(&self.uuid))
             .join("content.rtf");
 
         if !rtf_path.exists() {
@@ -168,7 +284,7 @@ impl Document {
         let dir_path = project_path
             .join("Files")
             .join("Data")
-            .join(self.uuid.to_string());
+            .join(data_dir_name(&self.uuid));
 
         std::fs::create_dir_all(&dir_path)?;
 
@@ -184,7 +300,7 @@ impl Document {
         let dir_path = project_path
             .join("Files")
             .join("Data")
-            .join(self.uuid.to_string());
+            .join(data_dir_name(&self.uuid));
 
         std::fs::create_dir_all(&dir_path)?;
         std::fs::write(dir_path.join("synopsis.txt"), synopsis)?;
@@ -196,7 +312,7 @@ impl Document {
         let dir_path = project_path
             .join("Files")
             .join("Data")
-            .join(self.uuid.to_string());
+            .join(data_dir_name(&self.uuid));
 
         std::fs::create_dir_all(&dir_path)?;
         let rtf = generate_rtf_from_text(notes);

@@ -9,7 +9,7 @@ pub mod trash;
 mod scrivx;
 
 pub use binder::{Binder, BinderItem};
-pub use document::{Document, DocumentContent, Folder, FormattedContent};
+pub use document::{Document, DocumentContent, Folder, FolderType, FormattedContent};
 pub use error::{Result, ScrivenerError};
 pub use metadata::{DocumentMetadata, ProjectMetadata};
 pub use search::{Match, SearchResult};

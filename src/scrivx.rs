@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::binder::{Binder, BinderItem};
-use crate::document::{Document, DocumentContent, Folder};
+use crate::document::{Document, DocumentContent, Folder, FolderType};
 use crate::error::{Result, ScrivenerError};
 use crate::metadata::{DocumentMetadata, ProjectMetadata};
 use crate::trash::{Trash, TrashedItem};
@@ -126,6 +126,7 @@ struct RawScrivenerProjectOut {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename = "Binder")]
 struct RawBinderOut {
     #[serde(rename = "BinderItem")]
     items: Vec<RawBinderItemOut>,
@@ -206,8 +207,16 @@ struct RawProjectPropertiesOut {
 // -- Conversion: Raw → Domain --
 
 fn parse_datetime(s: Option<&str>) -> DateTime<Utc> {
-    s.and_then(|s| s.parse::<DateTime<Utc>>().ok())
-        .unwrap_or_else(Utc::now)
+    s.and_then(|s| {
+        // Try ISO 8601 / RFC 3339 first (e.g. "2024-01-15T10:00:00Z")
+        s.parse::<DateTime<Utc>>().ok().or_else(|| {
+            // Try Scrivener's native format (e.g. "2024-01-15 21:49:00 +0800")
+            chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S %z")
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+    })
+    .unwrap_or_else(Utc::now)
 }
 
 fn convert_metadata(raw: &RawBinderItem) -> DocumentMetadata {
@@ -251,7 +260,7 @@ fn convert_binder_item(raw: RawBinderItem) -> Result<BinderItem> {
     let metadata = convert_metadata(&raw);
 
     match raw.item_type.as_str() {
-        "Text" => {
+        "Text" | "Image" | "PDF" => {
             let keywords = raw
                 .metadata
                 .as_ref()
@@ -270,6 +279,12 @@ fn convert_binder_item(raw: RawBinderItem) -> Result<BinderItem> {
             }))
         }
         "Folder" | "DraftFolder" | "ResearchFolder" => {
+            let folder_type = match raw.item_type.as_str() {
+                "DraftFolder" => FolderType::DraftFolder,
+                "ResearchFolder" => FolderType::ResearchFolder,
+                _ => FolderType::Folder,
+            };
+
             let children = raw
                 .children
                 .map(|c| {
@@ -286,6 +301,7 @@ fn convert_binder_item(raw: RawBinderItem) -> Result<BinderItem> {
                 title,
                 children,
                 metadata,
+                folder_type,
             }))
         }
         "TrashFolder" => {
@@ -306,6 +322,7 @@ fn convert_binder_item(raw: RawBinderItem) -> Result<BinderItem> {
                 title,
                 children,
                 metadata,
+                folder_type: FolderType::TrashFolder,
             }))
         }
         other => Err(ScrivenerError::ScrivxParseError {
@@ -339,6 +356,10 @@ pub fn parse_scrivx_str(xml: &str) -> Result<(Binder, ProjectMetadata, Trash)> {
 
     for raw_item in raw.binder.items {
         if raw_item.item_type == "TrashFolder" {
+            // Store the trash folder UUID
+            if let Ok(trash_uuid) = Uuid::parse_str(&raw_item.uuid) {
+                trash.uuid = Some(trash_uuid);
+            }
             // Parse trash children
             if let Some(children) = raw_item.children {
                 for child in children.items {
@@ -369,7 +390,9 @@ pub fn parse_scrivx_str(xml: &str) -> Result<(Binder, ProjectMetadata, Trash)> {
 // -- Serialization: Domain → XML --
 
 fn format_datetime(dt: &DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    use chrono::Local;
+    let local = dt.with_timezone(&Local);
+    local.format("%Y-%m-%d %H:%M:%S %z").to_string()
 }
 
 fn binder_item_to_raw(item: &BinderItem) -> RawBinderItemOut {
@@ -418,7 +441,7 @@ fn binder_item_to_raw(item: &BinderItem) -> RawBinderItemOut {
 
             RawBinderItemOut {
                 uuid: folder.uuid.to_string().to_uppercase(),
-                item_type: "Folder".to_string(),
+                item_type: folder.folder_type.as_xml_type().to_string(),
                 created: format_datetime(&folder.metadata.created),
                 modified: format_datetime(&folder.metadata.modified),
                 title: folder.title.clone(),
@@ -457,21 +480,30 @@ pub fn serialize_scrivx(
     let mut all_items: Vec<RawBinderItemOut> =
         binder.root.iter().map(binder_item_to_raw).collect();
 
-    // Add trash folder
-    if !trash.items.is_empty() {
+    // Add trash folder (always include it if there's a UUID, even if empty)
+    {
+        let trash_uuid = trash
+            .uuid
+            .map(|u| u.to_string().to_uppercase())
+            .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
+
         let trash_children: Vec<RawBinderItemOut> =
             trash.items.iter().map(trashed_item_to_raw).collect();
 
         all_items.push(RawBinderItemOut {
-            uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+            uuid: trash_uuid,
             item_type: "TrashFolder".to_string(),
             created: format_datetime(&Utc::now()),
             modified: format_datetime(&Utc::now()),
             title: "Trash".to_string(),
             metadata: None,
-            children: Some(RawChildrenOut {
-                items: trash_children,
-            }),
+            children: if trash_children.is_empty() {
+                None
+            } else {
+                Some(RawChildrenOut {
+                    items: trash_children,
+                })
+            },
         });
     }
 
@@ -491,6 +523,79 @@ pub fn serialize_scrivx(
         })?;
 
     Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}", xml))
+}
+
+/// Serialize only the `<Binder>...</Binder>` section as an XML string.
+fn serialize_binder_xml(binder: &Binder, trash: &Trash) -> Result<String> {
+    let mut all_items: Vec<RawBinderItemOut> =
+        binder.root.iter().map(binder_item_to_raw).collect();
+
+    // Add trash folder
+    {
+        let trash_uuid = trash
+            .uuid
+            .map(|u| u.to_string().to_uppercase())
+            .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
+
+        let trash_children: Vec<RawBinderItemOut> =
+            trash.items.iter().map(trashed_item_to_raw).collect();
+
+        all_items.push(RawBinderItemOut {
+            uuid: trash_uuid,
+            item_type: "TrashFolder".to_string(),
+            created: format_datetime(&Utc::now()),
+            modified: format_datetime(&Utc::now()),
+            title: "Trash".to_string(),
+            metadata: None,
+            children: if trash_children.is_empty() {
+                None
+            } else {
+                Some(RawChildrenOut {
+                    items: trash_children,
+                })
+            },
+        });
+    }
+
+    let binder_out = RawBinderOut { items: all_items };
+    let xml = quick_xml::se::to_string(&binder_out).map_err(|e| ScrivenerError::ScrivxParseError {
+        message: format!("Binder XML serialization failed: {}", e),
+    })?;
+    Ok(xml)
+}
+
+/// Serialize the project by replacing only the `<Binder>...</Binder>` section in the
+/// original raw XML, preserving all other elements (Collections, PrintSettings, etc.).
+pub(crate) fn serialize_scrivx_preserving(
+    raw_xml: &str,
+    binder: &Binder,
+    trash: &Trash,
+) -> Result<String> {
+    let binder_xml = serialize_binder_xml(binder, trash)?;
+
+    // Find the <Binder> ... </Binder> region in the raw XML and replace it.
+    // We look for the outermost <Binder> and </Binder> tags.
+    let binder_start = raw_xml
+        .find("<Binder")
+        .ok_or_else(|| ScrivenerError::ScrivxParseError {
+            message: "Could not find <Binder> tag in raw XML".into(),
+        })?;
+
+    let binder_end_tag = "</Binder>";
+    let binder_end = raw_xml
+        .find(binder_end_tag)
+        .ok_or_else(|| ScrivenerError::ScrivxParseError {
+            message: "Could not find </Binder> tag in raw XML".into(),
+        })?;
+    let binder_end = binder_end + binder_end_tag.len();
+
+    // Build the replacement: splice the new binder XML into the original
+    let mut result = String::with_capacity(raw_xml.len());
+    result.push_str(&raw_xml[..binder_start]);
+    result.push_str(&binder_xml);
+    result.push_str(&raw_xml[binder_end..]);
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -595,5 +700,109 @@ mod tests {
         assert_eq!(binder2.root.len(), binder.root.len());
         assert_eq!(metadata2.title, metadata.title);
         assert_eq!(trash2.items.len(), trash.items.len());
+    }
+
+    #[test]
+    fn preserving_serialize_keeps_non_binder_sections() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ScrivenerProject Identifier="test" Version="2.0" Creator="14.3 (3192073)" Device="JiayunMBP" ModID="A1B2C3">
+  <Binder>
+    <BinderItem UUID="AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" Type="DraftFolder" Created="2024-01-15T10:00:00Z" Modified="2024-01-15T10:00:00Z">
+      <Title>Draft</Title>
+    </BinderItem>
+    <BinderItem UUID="CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC" Type="TrashFolder" Created="2024-01-15T10:00:00Z" Modified="2024-01-15T10:00:00Z">
+      <Title>Trash</Title>
+    </BinderItem>
+  </Binder>
+  <Collections>
+    <Collection Type="RecentSearch" ID="1234">
+      <Title>Search Results</Title>
+    </Collection>
+  </Collections>
+  <PrintSettings>
+    <PaperSize>612.0, 792.0</PaperSize>
+  </PrintSettings>
+  <ProjectProperties>
+    <ProjectTitle>Test</ProjectTitle>
+  </ProjectProperties>
+</ScrivenerProject>"#;
+
+        let (binder, _, trash) = parse_scrivx_str(xml).unwrap();
+        let result = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
+
+        // The non-binder sections must be preserved
+        assert!(result.contains("Creator=\"14.3 (3192073)\""), "Creator attribute lost");
+        assert!(result.contains("Device=\"JiayunMBP\""), "Device attribute lost");
+        assert!(result.contains("ModID=\"A1B2C3\""), "ModID attribute lost");
+        assert!(result.contains("<Collections>"), "Collections section lost");
+        assert!(result.contains("<PrintSettings>"), "PrintSettings section lost");
+        assert!(result.contains("<PaperSize>612.0, 792.0</PaperSize>"), "PaperSize lost");
+
+        // The binder should still be parseable
+        let (binder2, _, _) = parse_scrivx_str(&result).unwrap();
+        assert_eq!(binder2.root.len(), binder.root.len());
+    }
+
+    #[test]
+    fn folder_types_preserved_on_parse() {
+        use crate::document::FolderType;
+
+        let xml = include_str!("../tests/fixtures/sample.scriv/sample.scrivx");
+        let (binder, _, _) = parse_scrivx_str(xml).unwrap();
+
+        // First folder should be DraftFolder
+        if let BinderItem::Folder(f) = &binder.root[0] {
+            assert_eq!(f.folder_type, FolderType::DraftFolder);
+        } else {
+            panic!("Expected DraftFolder");
+        }
+
+        // Second folder should be ResearchFolder
+        if let BinderItem::Folder(f) = &binder.root[1] {
+            assert_eq!(f.folder_type, FolderType::ResearchFolder);
+        } else {
+            panic!("Expected ResearchFolder");
+        }
+    }
+
+    #[test]
+    fn folder_types_preserved_in_serialized_binder() {
+        let xml = include_str!("../tests/fixtures/sample.scriv/sample.scrivx");
+        let (binder, _, trash) = parse_scrivx_str(xml).unwrap();
+
+        let result = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
+
+        // DraftFolder and ResearchFolder types must be in the output
+        assert!(result.contains("Type=\"DraftFolder\""), "DraftFolder type lost in serialized binder");
+        assert!(result.contains("Type=\"ResearchFolder\""), "ResearchFolder type lost in serialized binder");
+        assert!(result.contains("Type=\"TrashFolder\""), "TrashFolder type lost in serialized binder");
+    }
+
+    #[test]
+    fn trash_uuid_preserved() {
+        let xml = include_str!("../tests/fixtures/sample.scriv/sample.scrivx");
+        let (_, _, trash) = parse_scrivx_str(xml).unwrap();
+
+        assert_eq!(
+            trash.uuid,
+            Some(Uuid::parse_str("CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC").unwrap())
+        );
+    }
+
+    #[test]
+    fn preserving_serialize_roundtrip_with_fixture() {
+        let xml = include_str!("../tests/fixtures/sample.scriv/sample.scrivx");
+        let (binder, _, trash) = parse_scrivx_str(xml).unwrap();
+
+        let result = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
+        let (binder2, metadata2, trash2) = parse_scrivx_str(&result).unwrap();
+
+        assert_eq!(binder2.root.len(), binder.root.len());
+        assert_eq!(metadata2.title, "Sample Novel");
+        assert_eq!(trash2.items.len(), trash.items.len());
+
+        // Verify ProjectProperties is still there
+        assert!(result.contains("<ProjectTitle>Sample Novel</ProjectTitle>"));
+        assert!(result.contains("<FullName>Test Author</FullName>"));
     }
 }

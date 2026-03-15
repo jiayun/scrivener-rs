@@ -8,7 +8,7 @@ use crate::document::Document;
 use crate::error::{Result, ScrivenerError};
 use crate::metadata::ProjectMetadata;
 use crate::search::{Match, SearchResult};
-use crate::scrivx::{parse_scrivx_str, serialize_scrivx};
+use crate::scrivx::{parse_scrivx_str, serialize_scrivx, serialize_scrivx_preserving};
 use crate::statistics::ProjectStatistics;
 use crate::trash::{Trash, TrashedItem};
 
@@ -19,6 +19,8 @@ pub struct Project {
     pub binder: Binder,
     pub metadata: ProjectMetadata,
     pub trash: Trash,
+    /// The raw XML content of the scrivx file, used to preserve structure on save.
+    raw_xml: String,
 }
 
 impl Project {
@@ -38,12 +40,20 @@ impl Project {
             binder,
             metadata,
             trash,
+            raw_xml: xml_content,
         })
     }
 
     pub fn save(&self) -> Result<()> {
         let scrivx_path = find_scrivx_file(&self.path)?;
-        let xml = serialize_scrivx(&self.binder, &self.metadata, &self.trash)?;
+
+        // If we have the original raw XML, preserve the full structure and only
+        // replace the <Binder> section. Otherwise fall back to full serialization.
+        let xml = if !self.raw_xml.is_empty() {
+            serialize_scrivx_preserving(&self.raw_xml, &self.binder, &self.trash)?
+        } else {
+            serialize_scrivx(&self.binder, &self.metadata, &self.trash)?
+        };
 
         let temp_path = scrivx_path.with_extension("scrivx.tmp");
         std::fs::write(&temp_path, &xml)?;
@@ -78,8 +88,9 @@ impl Project {
                     let matches: Vec<Match> = lower_text
                         .match_indices(&lower_query)
                         .map(|(pos, _)| {
-                            let start = pos.saturating_sub(40);
-                            let end = (pos + query.len() + 40).min(text.len());
+                            // Use char-boundary-safe slicing for multi-byte text
+                            let start = floor_char_boundary(text, pos.saturating_sub(40));
+                            let end = ceil_char_boundary(text, (pos + query.len() + 40).min(text.len()));
                             Match {
                                 context: text[start..end].to_string(),
                                 position: (pos, pos + query.len()),
@@ -116,8 +127,8 @@ impl Project {
                     let matches: Vec<Match> = re
                         .find_iter(text)
                         .map(|m| {
-                            let start = m.start().saturating_sub(40);
-                            let end = (m.end() + 40).min(text.len());
+                            let start = floor_char_boundary(text, m.start().saturating_sub(40));
+                            let end = ceil_char_boundary(text, (m.end() + 40).min(text.len()));
                             Match {
                                 context: text[start..end].to_string(),
                                 position: (m.start(), m.end()),
@@ -185,7 +196,7 @@ impl Project {
                 .path
                 .join("Files")
                 .join("Data")
-                .join(uuid.to_string());
+                .join(uuid.to_string().to_uppercase());
 
             if data_dir.exists() {
                 std::fs::remove_dir_all(&data_dir)?;
@@ -245,6 +256,30 @@ fn find_scrivx_file(project_dir: &Path) -> Result<PathBuf> {
             message: "Multiple .scrivx files found".into(),
         }),
     }
+}
+
+/// Find the largest byte index <= `idx` that is a char boundary.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the smallest byte index >= `idx` that is a char boundary.
+fn ceil_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 pub(crate) fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
