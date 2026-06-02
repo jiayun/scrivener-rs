@@ -145,6 +145,13 @@ fn is_header_group(group: &scrivener_rtf::Group) -> bool {
     )
 }
 
+fn skip_first_char(s: &str) -> &str {
+    s.char_indices()
+        .nth(1)
+        .map(|(idx, _)| &s[idx..])
+        .unwrap_or("")
+}
+
 fn extract_text_from_group(group: &scrivener_rtf::Group, text: &mut String) {
     if is_header_group(group) {
         return;
@@ -157,16 +164,18 @@ fn extract_text_from_group(group: &scrivener_rtf::Group, text: &mut String) {
                 if skip_next_text {
                     skip_next_text = false;
                     // Skip the first char (ANSI fallback '?' after \uN)
-                    if s.len() > 1 {
-                        text.push_str(&s[1..]);
-                    }
+                    text.push_str(skip_first_char(s));
                 } else {
                     text.push_str(s);
                 }
             }
             scrivener_rtf::Content::ControlWord(name, Some(code)) if name == "u" => {
                 let code = *code;
-                let unsigned = if code < 0 { (code + 0x10000) as u16 } else { code as u16 };
+                let unsigned = if code < 0 {
+                    (code + 0x10000) as u16
+                } else {
+                    code as u16
+                };
 
                 if (0xD800..=0xDBFF).contains(&unsigned) {
                     // High surrogate — store and wait for low surrogate
@@ -260,10 +269,11 @@ impl Document {
             });
         }
 
-        let rtf_doc = scrivener_rtf::parse_file(&rtf_path)
-            .map_err(|e| crate::error::ScrivenerError::ContentError {
+        let rtf_doc = scrivener_rtf::parse_file(&rtf_path).map_err(|e| {
+            crate::error::ScrivenerError::ContentError {
                 message: format!("Failed to parse RTF for {}: {}", self.uuid, e),
-            })?;
+            }
+        })?;
 
         let plain_text = extract_plain_text(&rtf_doc);
         let word_count = count_words(&plain_text);
@@ -352,5 +362,21 @@ mod tests {
         doc.add_keyword("beta");
         doc.remove_keyword("alpha");
         assert_eq!(doc.keywords, vec!["beta"]);
+    }
+
+    #[test]
+    fn extract_plain_text_skips_multibyte_unicode_fallback_char() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let rtf_path = temp.path().join("content.rtf");
+        std::fs::write(
+            &rtf_path,
+            "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fnil Helvetica;}}\n\\pard\\f0\\fs24 \\u233ábc\\par}",
+        )
+        .unwrap();
+
+        let rtf_doc = scrivener_rtf::parse_file(&rtf_path).unwrap();
+        let plain_text = extract_plain_text(&rtf_doc);
+
+        assert!(plain_text.contains("ébc"));
     }
 }
