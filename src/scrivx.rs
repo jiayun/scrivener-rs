@@ -648,7 +648,7 @@ fn metadata_to_element(item: &BinderItem, existing: Option<&Element>) -> Element
 
         let mut items = unknown;
         let mut fields = item.metadata().custom_metadata.iter().collect::<Vec<_>>();
-        fields.sort_by(|(left, _), (right, _)| left.cmp(right));
+        fields.sort_by_key(|(field_id, _)| *field_id);
         for (field_id, value) in fields {
             let mut metadata_item = by_field_id
                 .remove(field_id)
