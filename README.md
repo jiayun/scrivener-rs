@@ -12,7 +12,7 @@ A Rust library for reading and writing [Scrivener 3](https://www.literatureandla
 - **Open & save** — load `.scriv` bundles, modify them, and write changes back (atomic save via temp file)
 - **Binder navigation** — traverse children of any binder item, find items by UUID or title, flatten the tree with paths
 - **Move items** — reorganize documents and folders under either document or folder parents with cycle protection
-- **Lossless binder round-tripping** — preserve document children and original Scrivener item types such as `Image`, `PDF`, and `WebArchive`
+- **Lossless binder round-tripping** — preserve document children, original item types, and unmodeled Scrivener XML such as `TextSettings`
 - **RTF content** — read and write document or folder content, notes, and synopses with plain text extraction (via [`scrivener-rtf`](https://crates.io/crates/scrivener-rtf))
 - **Full-text search** — plain text search, regex search, and keyword-based filtering
 - **Statistics** — word counts, character counts, per-document breakdowns
@@ -68,9 +68,11 @@ fn main() -> scrivener::Result<()> {
 
 Scrivener permits text-like documents to contain binder children. Version 0.2
 models that structure explicitly and preserves the original XML `Type` for
-non-folder items. As a result, the public `Document` and `Folder` structs gained
-fields. Code that constructs either type should use `..Default::default()` so it
-continues to compile as the model evolves.
+non-folder items. Starting with 0.2.1, saves also merge managed binder changes
+into the original XML by UUID, preserving unmodeled Scrivener-owned fields such
+as `TextSettings` and extension attributes. As a result, the public `Document`
+and `Folder` structs gained fields. Code that constructs either type should use
+`..Default::default()` so it continues to compile as the model evolves.
 
 ## License
 
