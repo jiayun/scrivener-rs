@@ -105,7 +105,11 @@ This keeps initial project load fast — a Scrivener project with hundreds of do
 
 ### 5. BinderItem as Enum
 
-`BinderItem` is an enum with `Document` and `Folder` variants rather than a single struct with an `item_type` field. This makes the type system enforce the structural constraint: only `Folder` variants can have `children`.
+`BinderItem` is an enum with `Document` and `Folder` variants rather than a
+single struct with an `item_type` field. Scrivener permits either variant to
+have children, so recursive code uses `BinderItem::children()` and
+`children_mut()` instead of matching only folders. Documents retain their
+original XML type for lossless round-tripping.
 
 ### 6. scrivener-rtf Integration
 

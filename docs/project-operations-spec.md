@@ -17,8 +17,8 @@ Opens a `.scriv` bundle and returns a fully-constructed `Project`.
    - Read file contents
    - Deserialize with quick-xml + serde into RawScrivenerProject
    - Convert raw types to domain types (Binder, ProjectMetadata, Trash)
-4. Resolve content paths:
-   - Walk binder tree, set each Document's rtf_path based on UUID
+4. Resolve content paths lazily:
+   - Documents and folders derive content paths from their UUID when read
 5. Return Project { path, binder, metadata, trash }
 ```
 
@@ -222,7 +222,8 @@ fn flatten_recursive<'a>(
 
 ### `move_item` — Re-parent with Validation
 
-Moves a binder item to a new parent folder (or to root if `new_parent` is `None`).
+Moves a binder item to a new parent item (or to root if `new_parent` is
+`None`). Scrivener allows documents as well as folders to contain children.
 
 ```rust
 impl Binder {
@@ -232,19 +233,15 @@ impl Binder {
             return Err(ScrivenerError::DocumentNotFound { uuid });
         }
 
-        // Step 2: If new_parent is specified, validate it exists and is a folder
+        // Step 2: If new_parent is specified, validate it exists
         if let Some(parent_uuid) = new_parent {
-            match self.find_by_uuid(parent_uuid) {
-                Some(BinderItem::Folder(_)) => {}
-                Some(_) => return Err(ScrivenerError::InvalidProject {
-                    message: "Cannot move item into a document".into(),
-                }),
-                None => return Err(ScrivenerError::DocumentNotFound { uuid: parent_uuid }),
+            if self.find_by_uuid(parent_uuid).is_none() {
+                return Err(ScrivenerError::DocumentNotFound { uuid: parent_uuid });
             }
-            // Step 3: Prevent moving a folder into its own descendant
+            // Step 3: Prevent moving an item into itself or its descendant
             if is_descendant(self, uuid, parent_uuid) {
                 return Err(ScrivenerError::InvalidProject {
-                    message: "Cannot move folder into its own descendant".into(),
+                    message: "Cannot move item into itself or its own descendant".into(),
                 });
             }
         }
@@ -257,7 +254,10 @@ impl Binder {
         match new_parent {
             None => self.root.push(item),
             Some(parent_uuid) => {
-                insert_into_folder(&mut self.root, parent_uuid, item)?;
+                self.find_by_uuid_mut(parent_uuid)
+                    .expect("parent existence already validated")
+                    .children_mut()
+                    .push(item);
             }
         }
 

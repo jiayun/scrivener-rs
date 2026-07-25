@@ -9,6 +9,10 @@ use crate::metadata::DocumentMetadata;
 pub struct Document {
     pub uuid: Uuid,
     pub title: String,
+    /// Child binder items. Scrivener allows text-like items to contain children.
+    pub children: Vec<crate::binder::BinderItem>,
+    /// Original XML `Type` value (for example `Text`, `Image`, or `WebArchive`).
+    pub doc_type: String,
     pub synopsis: Option<String>,
     pub notes: Option<String>,
     pub keywords: Vec<String>,
@@ -21,6 +25,8 @@ impl Default for Document {
         Self {
             uuid: Uuid::new_v4(),
             title: String::new(),
+            children: Vec::new(),
+            doc_type: "Text".to_string(),
             synopsis: None,
             notes: None,
             keywords: Vec::new(),
@@ -61,6 +67,10 @@ pub struct Folder {
     pub uuid: Uuid,
     pub title: String,
     pub children: Vec<crate::binder::BinderItem>,
+    pub synopsis: Option<String>,
+    pub notes: Option<String>,
+    pub keywords: Vec<String>,
+    pub content: DocumentContent,
     pub metadata: DocumentMetadata,
     /// The original folder type from the scrivx XML.
     pub folder_type: FolderType,
@@ -72,6 +82,10 @@ impl Default for Folder {
             uuid: Uuid::new_v4(),
             title: String::new(),
             children: Vec::new(),
+            synopsis: None,
+            notes: None,
+            keywords: Vec::new(),
+            content: DocumentContent::new(),
             metadata: DocumentMetadata::default(),
             folder_type: FolderType::Folder,
         }
@@ -251,82 +265,119 @@ fn data_dir_name(uuid: &Uuid) -> String {
     uuid.to_string().to_uppercase()
 }
 
+fn item_data_dir(project_path: &Path, uuid: &Uuid) -> PathBuf {
+    project_path
+        .join("Files")
+        .join("Data")
+        .join(data_dir_name(uuid))
+}
+
+fn read_item_content(project_path: &Path, uuid: &Uuid) -> Result<DocumentContent> {
+    let rtf_path = item_data_dir(project_path, uuid).join("content.rtf");
+
+    if !rtf_path.exists() {
+        return Ok(DocumentContent {
+            rtf_path,
+            plain_text: Some(String::new()),
+            formatted: None,
+        });
+    }
+
+    let rtf_doc = scrivener_rtf::parse_file(&rtf_path).map_err(|e| {
+        crate::error::ScrivenerError::ContentError {
+            message: format!("Failed to parse RTF for {}: {}", uuid, e),
+        }
+    })?;
+
+    let plain_text = extract_plain_text(&rtf_doc);
+    let word_count = count_words(&plain_text);
+    let char_count = plain_text.chars().count();
+
+    Ok(DocumentContent {
+        rtf_path,
+        plain_text: Some(plain_text.clone()),
+        formatted: Some(FormattedContent {
+            text: plain_text,
+            word_count,
+            character_count: char_count,
+        }),
+    })
+}
+
+fn write_item_content(project_path: &Path, uuid: &Uuid, content: &str) -> Result<()> {
+    let dir_path = item_data_dir(project_path, uuid);
+    std::fs::create_dir_all(&dir_path)?;
+    std::fs::write(
+        dir_path.join("content.rtf"),
+        generate_rtf_from_text(content),
+    )?;
+    Ok(())
+}
+
+fn read_item_synopsis(project_path: &Path, uuid: &Uuid) -> Result<Option<String>> {
+    let path = item_data_dir(project_path, uuid).join("synopsis.txt");
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read_to_string(path)?))
+}
+
+fn write_item_synopsis(project_path: &Path, uuid: &Uuid, synopsis: &str) -> Result<()> {
+    let dir_path = item_data_dir(project_path, uuid);
+    std::fs::create_dir_all(&dir_path)?;
+    std::fs::write(dir_path.join("synopsis.txt"), synopsis)?;
+    Ok(())
+}
+
+fn read_item_notes(project_path: &Path, uuid: &Uuid) -> Result<Option<String>> {
+    let path = item_data_dir(project_path, uuid).join("notes.rtf");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let rtf_doc = scrivener_rtf::parse_file(&path).map_err(|e| {
+        crate::error::ScrivenerError::ContentError {
+            message: format!("Failed to parse notes RTF for {}: {}", uuid, e),
+        }
+    })?;
+    Ok(Some(extract_plain_text(&rtf_doc)))
+}
+
+fn write_item_notes(project_path: &Path, uuid: &Uuid, notes: &str) -> Result<()> {
+    let dir_path = item_data_dir(project_path, uuid);
+    std::fs::create_dir_all(&dir_path)?;
+    std::fs::write(dir_path.join("notes.rtf"), generate_rtf_from_text(notes))?;
+    Ok(())
+}
+
 // -- Document methods --
 
 impl Document {
     pub fn read_content(&self, project_path: &Path) -> Result<DocumentContent> {
-        let rtf_path = project_path
-            .join("Files")
-            .join("Data")
-            .join(data_dir_name(&self.uuid))
-            .join("content.rtf");
-
-        if !rtf_path.exists() {
-            return Ok(DocumentContent {
-                rtf_path,
-                plain_text: Some(String::new()),
-                formatted: None,
-            });
-        }
-
-        let rtf_doc = scrivener_rtf::parse_file(&rtf_path).map_err(|e| {
-            crate::error::ScrivenerError::ContentError {
-                message: format!("Failed to parse RTF for {}: {}", self.uuid, e),
-            }
-        })?;
-
-        let plain_text = extract_plain_text(&rtf_doc);
-        let word_count = count_words(&plain_text);
-        let char_count = plain_text.chars().count();
-
-        Ok(DocumentContent {
-            rtf_path,
-            plain_text: Some(plain_text.clone()),
-            formatted: Some(FormattedContent {
-                text: plain_text,
-                word_count,
-                character_count: char_count,
-            }),
-        })
+        read_item_content(project_path, &self.uuid)
     }
 
     pub fn write_content(&mut self, project_path: &Path, content: &str) -> Result<()> {
-        let dir_path = project_path
-            .join("Files")
-            .join("Data")
-            .join(data_dir_name(&self.uuid));
-
-        std::fs::create_dir_all(&dir_path)?;
-
-        let rtf_path = dir_path.join("content.rtf");
-        let rtf = generate_rtf_from_text(content);
-        std::fs::write(&rtf_path, rtf)?;
-
+        write_item_content(project_path, &self.uuid, content)?;
         self.content.plain_text = Some(content.to_string());
         Ok(())
     }
 
-    pub fn update_synopsis(&mut self, project_path: &Path, synopsis: &str) -> Result<()> {
-        let dir_path = project_path
-            .join("Files")
-            .join("Data")
-            .join(data_dir_name(&self.uuid));
+    pub fn read_synopsis(&self, project_path: &Path) -> Result<Option<String>> {
+        read_item_synopsis(project_path, &self.uuid)
+    }
 
-        std::fs::create_dir_all(&dir_path)?;
-        std::fs::write(dir_path.join("synopsis.txt"), synopsis)?;
+    pub fn update_synopsis(&mut self, project_path: &Path, synopsis: &str) -> Result<()> {
+        write_item_synopsis(project_path, &self.uuid, synopsis)?;
         self.synopsis = Some(synopsis.to_string());
         Ok(())
     }
 
-    pub fn update_notes(&mut self, project_path: &Path, notes: &str) -> Result<()> {
-        let dir_path = project_path
-            .join("Files")
-            .join("Data")
-            .join(data_dir_name(&self.uuid));
+    pub fn read_notes(&self, project_path: &Path) -> Result<Option<String>> {
+        read_item_notes(project_path, &self.uuid)
+    }
 
-        std::fs::create_dir_all(&dir_path)?;
-        let rtf = generate_rtf_from_text(notes);
-        std::fs::write(dir_path.join("notes.rtf"), rtf)?;
+    pub fn update_notes(&mut self, project_path: &Path, notes: &str) -> Result<()> {
+        write_item_notes(project_path, &self.uuid, notes)?;
         self.notes = Some(notes.to_string());
         Ok(())
     }
@@ -340,6 +391,49 @@ impl Document {
 
     pub fn remove_keyword(&mut self, keyword: &str) {
         self.keywords.retain(|k| k != keyword);
+    }
+}
+
+impl Folder {
+    pub fn read_content(&self, project_path: &Path) -> Result<DocumentContent> {
+        read_item_content(project_path, &self.uuid)
+    }
+
+    pub fn write_content(&mut self, project_path: &Path, content: &str) -> Result<()> {
+        write_item_content(project_path, &self.uuid, content)?;
+        self.content.plain_text = Some(content.to_string());
+        Ok(())
+    }
+
+    pub fn read_synopsis(&self, project_path: &Path) -> Result<Option<String>> {
+        read_item_synopsis(project_path, &self.uuid)
+    }
+
+    pub fn update_synopsis(&mut self, project_path: &Path, synopsis: &str) -> Result<()> {
+        write_item_synopsis(project_path, &self.uuid, synopsis)?;
+        self.synopsis = Some(synopsis.to_string());
+        Ok(())
+    }
+
+    pub fn read_notes(&self, project_path: &Path) -> Result<Option<String>> {
+        read_item_notes(project_path, &self.uuid)
+    }
+
+    pub fn update_notes(&mut self, project_path: &Path, notes: &str) -> Result<()> {
+        write_item_notes(project_path, &self.uuid, notes)?;
+        self.notes = Some(notes.to_string());
+        Ok(())
+    }
+
+    pub fn add_keyword(&mut self, keyword: &str) {
+        let keyword = keyword.to_string();
+        if !self.keywords.contains(&keyword) {
+            self.keywords.push(keyword);
+        }
+    }
+
+    pub fn remove_keyword(&mut self, keyword: &str) {
+        self.keywords.retain(|candidate| candidate != keyword);
     }
 }
 

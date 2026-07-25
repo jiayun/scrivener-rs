@@ -10,9 +10,10 @@ A Rust library for reading and writing [Scrivener 3](https://www.literatureandla
 ## Features
 
 - **Open & save** — load `.scriv` bundles, modify them, and write changes back (atomic save via temp file)
-- **Binder navigation** — traverse the hierarchical document tree, find items by UUID or title, flatten the tree with paths
-- **Move items** — reorganize documents and folders within the binder
-- **RTF content** — read and write document content with plain text extraction (via [`scrivener-rtf`](https://crates.io/crates/scrivener-rtf))
+- **Binder navigation** — traverse children of any binder item, find items by UUID or title, flatten the tree with paths
+- **Move items** — reorganize documents and folders under either document or folder parents with cycle protection
+- **Lossless binder round-tripping** — preserve document children and original Scrivener item types such as `Image`, `PDF`, and `WebArchive`
+- **RTF content** — read and write document or folder content, notes, and synopses with plain text extraction (via [`scrivener-rtf`](https://crates.io/crates/scrivener-rtf))
 - **Full-text search** — plain text search, regex search, and keyword-based filtering
 - **Statistics** — word counts, character counts, per-document breakdowns
 - **Trash management** — list, recover, and permanently delete trashed items
@@ -38,9 +39,9 @@ fn main() -> scrivener::Result<()> {
     // Find a document by title
     let docs = project.binder.find_by_title("Chapter One");
 
-    // Read document content
-    if let Some(scrivener::BinderItem::Document(doc)) = docs.first() {
-        let content = doc.read_content(&project.path)?;
+    // Every binder item, including folders, can have body text.
+    if let Some(item) = docs.first() {
+        let content = item.read_content(&project.path)?;
         if let Some(text) = &content.plain_text {
             println!("{text}");
         }
@@ -62,6 +63,14 @@ fn main() -> scrivener::Result<()> {
     Ok(())
 }
 ```
+
+## Upgrading to 0.2
+
+Scrivener permits text-like documents to contain binder children. Version 0.2
+models that structure explicitly and preserves the original XML `Type` for
+non-folder items. As a result, the public `Document` and `Folder` structs gained
+fields. Code that constructs either type should use `..Default::default()` so it
+continues to compile as the model evolves.
 
 ## License
 
