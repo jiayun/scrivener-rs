@@ -81,11 +81,18 @@ tests/
 
 ### 1. Serde Deserialization for XML
 
-The `.scrivx` file is parsed using `quick-xml` with serde `Deserialize`. Raw XML types in `scrivx.rs` map directly to the XML schema, then convert to domain types (`Binder`, `BinderItem`, etc.) via `From`/`TryFrom` impls.
+The `.scrivx` file is parsed using `quick-xml` with serde `Deserialize`. Raw XML
+types in `scrivx.rs` map the fields exposed by the domain model, then convert to
+domain types (`Binder`, `BinderItem`, etc.) via `From`/`TryFrom` impls. The
+original XML is retained by `Project`; on save, an `xmltree` DOM merge applies
+managed binder changes by UUID while preserving unmodeled elements and
+attributes.
 
 This two-layer approach keeps the XML schema details isolated from the public API. If Scrivener changes its XML format, only `scrivx.rs` needs updating.
 
-Alternative considered: manual `quick-xml` event-based parsing — more flexible but significantly more code and harder to maintain.
+Alternative considered: manual `quick-xml` event-based parsing — more flexible
+but significantly more code and harder to maintain. The DOM is used only for
+the preservation merge; typed parsing remains serde-based.
 
 ### 2. UUID-based File Paths
 

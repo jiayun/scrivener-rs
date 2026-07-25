@@ -338,7 +338,7 @@ The `<ScrivenerProject>` root element includes a `Version` attribute:
 ### Forward Compatibility
 
 - Unknown XML elements are ignored during deserialization (`#[serde(deny_unknown_fields)]` is NOT used)
-- Unknown `BinderItem` types log a warning and are skipped
+- Unknown `BinderItem` types are represented as documents with their original XML `Type`
 - Missing optional elements default to sensible values
 
 ## Error Handling
@@ -355,9 +355,19 @@ The `<ScrivenerProject>` root element includes a `Version` attribute:
 
 ### Serialization Back to XML
 
-When saving, the domain types convert back to raw XML types and serialize via `quick-xml::se::to_string`. The serialization preserves:
+For a newly constructed project, domain types convert to raw XML types and
+serialize via `quick-xml::se::to_string`. When saving a project opened from
+disk, the library instead merges the current binder tree into an `xmltree` DOM
+of the original `<Binder>` section. Existing items are matched by UUID, so
+structural changes and modeled values are updated while Scrivener-owned XML
+that the domain model does not understand remains attached to the item.
+
+The serialization preserves:
 - Element ordering (Binder items in their current order)
 - UUID formatting (uppercase hyphenated)
 - Date formatting (ISO 8601)
+- Unmodeled Binder/BinderItem attributes and elements, including `TextSettings`
+- Unmodeled metadata and children-container extensions
 
-Elements not parsed by this library (Collections, LabelSettings, StatusSettings) are preserved as-is using a passthrough mechanism.
+Elements outside `<Binder>` (Collections, LabelSettings, StatusSettings, and
+similar project settings) remain byte-for-byte unchanged.
