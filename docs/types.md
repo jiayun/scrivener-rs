@@ -29,7 +29,7 @@ pub struct Project {
 /// The binder tree — Scrivener's hierarchical document structure.
 ///
 /// The root contains top-level items (typically "Draft", "Research", "Trash").
-/// Each item can be a Document (leaf) or Folder (with children).
+/// Each item can be a Document or Folder, and either may have children.
 #[derive(Debug, Clone)]
 pub struct Binder {
     /// Top-level binder items (Draft, Research, etc.)
@@ -38,11 +38,11 @@ pub struct Binder {
 
 /// A single item in the binder tree.
 ///
-/// Uses an enum rather than a struct+type field so the type system
-/// enforces that only Folders can have children.
+/// Uses an enum to retain the logical document/folder distinction while
+/// preserving Scrivener's document-with-children model.
 #[derive(Debug, Clone)]
 pub enum BinderItem {
-    /// A text document (leaf node).
+    /// A text-like document that may contain child items.
     Document(Document),
 
     /// A folder that may contain child items.
@@ -52,7 +52,7 @@ pub enum BinderItem {
 
 ### BinderItem Notes
 
-- `BinderItem` is recursive through `Folder.children`
+- `BinderItem` is recursive through both `Document.children` and `Folder.children`
 - The Scrivener "Draft" folder is a `Folder` at the root level
 - The "Trash" folder is parsed separately into `Project.trash`
 - Each item has a UUID that matches the filesystem path under `Files/Data/`
@@ -71,6 +71,12 @@ pub struct Document {
 
     /// Document title as shown in the binder.
     pub title: String,
+
+    /// Child binder items.
+    pub children: Vec<BinderItem>,
+
+    /// Original XML Type value, such as Text, Image, PDF, or WebArchive.
+    pub doc_type: String,
 
     /// Short synopsis/summary text.
     pub synopsis: Option<String>,
@@ -106,6 +112,11 @@ pub struct Folder {
 
     /// Child items (documents and sub-folders).
     pub children: Vec<BinderItem>,
+
+    pub synopsis: Option<String>,
+    pub notes: Option<String>,
+    pub keywords: Vec<String>,
+    pub content: DocumentContent,
 
     /// Folder-level metadata.
     pub metadata: DocumentMetadata,

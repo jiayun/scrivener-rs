@@ -59,7 +59,8 @@ fn write_synopsis() {
         ..Default::default()
     };
 
-    doc.update_synopsis(&project_dir, "A brief summary.").unwrap();
+    doc.update_synopsis(&project_dir, "A brief summary.")
+        .unwrap();
     assert_eq!(doc.synopsis.as_deref(), Some("A brief summary."));
 
     let synopsis_path = project_dir
@@ -71,5 +72,40 @@ fn write_synopsis() {
     assert_eq!(
         std::fs::read_to_string(&synopsis_path).unwrap(),
         "A brief summary."
+    );
+}
+
+#[test]
+fn folder_content_synopsis_and_notes_roundtrip() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let project_dir = temp.path().join("test.scriv");
+    let mut folder = scrivener::Folder {
+        title: "Content Folder".into(),
+        ..Default::default()
+    };
+
+    folder
+        .write_content(&project_dir, "Folder body text.")
+        .unwrap();
+    folder
+        .update_synopsis(&project_dir, "Folder synopsis.")
+        .unwrap();
+    folder.update_notes(&project_dir, "Folder notes.").unwrap();
+
+    assert_eq!(
+        folder
+            .read_content(&project_dir)
+            .unwrap()
+            .plain_text
+            .as_deref(),
+        Some("Folder body text.\n")
+    );
+    assert_eq!(
+        folder.read_synopsis(&project_dir).unwrap().as_deref(),
+        Some("Folder synopsis.")
+    );
+    assert_eq!(
+        folder.read_notes(&project_dir).unwrap().as_deref(),
+        Some("Folder notes.\n")
     );
 }

@@ -95,6 +95,9 @@ pub fn write_scrivx<P: AsRef<Path>>(
 | Type Value | Description | Maps To |
 |-----------|-------------|---------|
 | `Text` | A text document | `BinderItem::Document` |
+| `Image` | An image item | `BinderItem::Document` with preserved type |
+| `PDF` | A PDF item | `BinderItem::Document` with preserved type |
+| Other values | Web archives and future item types | `BinderItem::Document` with preserved type |
 | `Folder` | A generic folder | `BinderItem::Folder` |
 | `DraftFolder` | The top-level Draft/Manuscript folder | `BinderItem::Folder` (root) |
 | `ResearchFolder` | The top-level Research folder | `BinderItem::Folder` (root) |

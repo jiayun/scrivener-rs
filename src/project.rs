@@ -7,8 +7,8 @@ use crate::binder::{Binder, BinderItem};
 use crate::document::Document;
 use crate::error::{Result, ScrivenerError};
 use crate::metadata::ProjectMetadata;
-use crate::search::{Match, SearchResult};
 use crate::scrivx::{parse_scrivx_str, serialize_scrivx, serialize_scrivx_preserving};
+use crate::search::{Match, SearchResult};
 use crate::statistics::ProjectStatistics;
 use crate::trash::{Trash, TrashedItem};
 
@@ -77,34 +77,33 @@ impl Project {
         let mut results = Vec::new();
 
         for (item, _path) in self.binder.flatten() {
-            if let BinderItem::Document(doc) = item {
-                let content = match doc.read_content(&self.path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
+            let content = match item.read_content(&self.path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
 
-                if let Some(text) = &content.plain_text {
-                    let lower_text = text.to_lowercase();
-                    let matches: Vec<Match> = lower_text
-                        .match_indices(&lower_query)
-                        .map(|(pos, _)| {
-                            // Use char-boundary-safe slicing for multi-byte text
-                            let start = floor_char_boundary(text, pos.saturating_sub(40));
-                            let end = ceil_char_boundary(text, (pos + query.len() + 40).min(text.len()));
-                            Match {
-                                context: text[start..end].to_string(),
-                                position: (pos, pos + query.len()),
-                            }
-                        })
-                        .collect();
+            if let Some(text) = &content.plain_text {
+                let lower_text = text.to_lowercase();
+                let matches: Vec<Match> = lower_text
+                    .match_indices(&lower_query)
+                    .map(|(pos, _)| {
+                        // Use char-boundary-safe slicing for multi-byte text
+                        let start = floor_char_boundary(text, pos.saturating_sub(40));
+                        let end =
+                            ceil_char_boundary(text, (pos + query.len() + 40).min(text.len()));
+                        Match {
+                            context: text[start..end].to_string(),
+                            position: (pos, pos + query.len()),
+                        }
+                    })
+                    .collect();
 
-                    if !matches.is_empty() {
-                        results.push(SearchResult {
-                            document_uuid: doc.uuid,
-                            document_title: doc.title.clone(),
-                            matches,
-                        });
-                    }
+                if !matches.is_empty() {
+                    results.push(SearchResult {
+                        document_uuid: item.uuid(),
+                        document_title: item.title().to_string(),
+                        matches,
+                    });
                 }
             }
         }
@@ -117,32 +116,30 @@ impl Project {
         let mut results = Vec::new();
 
         for (item, _path) in self.binder.flatten() {
-            if let BinderItem::Document(doc) = item {
-                let content = match doc.read_content(&self.path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
+            let content = match item.read_content(&self.path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
 
-                if let Some(text) = &content.plain_text {
-                    let matches: Vec<Match> = re
-                        .find_iter(text)
-                        .map(|m| {
-                            let start = floor_char_boundary(text, m.start().saturating_sub(40));
-                            let end = ceil_char_boundary(text, (m.end() + 40).min(text.len()));
-                            Match {
-                                context: text[start..end].to_string(),
-                                position: (m.start(), m.end()),
-                            }
-                        })
-                        .collect();
+            if let Some(text) = &content.plain_text {
+                let matches: Vec<Match> = re
+                    .find_iter(text)
+                    .map(|m| {
+                        let start = floor_char_boundary(text, m.start().saturating_sub(40));
+                        let end = ceil_char_boundary(text, (m.end() + 40).min(text.len()));
+                        Match {
+                            context: text[start..end].to_string(),
+                            position: (m.start(), m.end()),
+                        }
+                    })
+                    .collect();
 
-                    if !matches.is_empty() {
-                        results.push(SearchResult {
-                            document_uuid: doc.uuid,
-                            document_title: doc.title.clone(),
-                            matches,
-                        });
-                    }
+                if !matches.is_empty() {
+                    results.push(SearchResult {
+                        document_uuid: item.uuid(),
+                        document_title: item.title().to_string(),
+                        matches,
+                    });
                 }
             }
         }
@@ -219,19 +216,19 @@ impl Project {
         };
 
         for (item, _) in self.binder.flatten() {
-            match item {
-                BinderItem::Document(doc) => {
-                    stats.total_documents += 1;
-                    if let Ok(content) = doc.read_content(&self.path) {
-                        if let Some(formatted) = &content.formatted {
-                            stats.total_words += formatted.word_count;
-                            stats.total_characters += formatted.character_count;
-                            stats.words_by_document.insert(doc.uuid, formatted.word_count);
-                        }
-                    }
-                }
-                BinderItem::Folder(_) => {
-                    stats.total_folders += 1;
+            if matches!(item, BinderItem::Document(_)) {
+                stats.total_documents += 1;
+            } else {
+                stats.total_folders += 1;
+            }
+
+            if let Ok(content) = item.read_content(&self.path) {
+                if let Some(formatted) = &content.formatted {
+                    stats.total_words += formatted.word_count;
+                    stats.total_characters += formatted.character_count;
+                    stats
+                        .words_by_document
+                        .insert(item.uuid(), formatted.word_count);
                 }
             }
         }

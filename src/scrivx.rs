@@ -258,76 +258,55 @@ fn convert_binder_item(raw: RawBinderItem) -> Result<BinderItem> {
 
     let title = raw.title.clone().unwrap_or_default();
     let metadata = convert_metadata(&raw);
+    let keywords = raw
+        .metadata
+        .as_ref()
+        .and_then(|m| m.keywords.as_ref())
+        .map(|k| k.keywords.clone())
+        .unwrap_or_default();
+    let children = raw
+        .children
+        .map(|c| {
+            c.items
+                .into_iter()
+                .map(convert_binder_item)
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     match raw.item_type.as_str() {
-        "Text" | "Image" | "PDF" => {
-            let keywords = raw
-                .metadata
-                .as_ref()
-                .and_then(|m| m.keywords.as_ref())
-                .map(|k| k.keywords.clone())
-                .unwrap_or_default();
+        "Folder" | "DraftFolder" | "ResearchFolder" | "TrashFolder" => {
+            let folder_type = match raw.item_type.as_str() {
+                "DraftFolder" => FolderType::DraftFolder,
+                "ResearchFolder" => FolderType::ResearchFolder,
+                "TrashFolder" => FolderType::TrashFolder,
+                _ => FolderType::Folder,
+            };
 
-            Ok(BinderItem::Document(Document {
+            Ok(BinderItem::Folder(Folder {
                 uuid,
                 title,
+                children,
                 synopsis: None,
                 notes: None,
                 keywords,
                 content: DocumentContent::new(),
                 metadata,
-            }))
-        }
-        "Folder" | "DraftFolder" | "ResearchFolder" => {
-            let folder_type = match raw.item_type.as_str() {
-                "DraftFolder" => FolderType::DraftFolder,
-                "ResearchFolder" => FolderType::ResearchFolder,
-                _ => FolderType::Folder,
-            };
-
-            let children = raw
-                .children
-                .map(|c| {
-                    c.items
-                        .into_iter()
-                        .map(convert_binder_item)
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
-
-            Ok(BinderItem::Folder(Folder {
-                uuid,
-                title,
-                children,
-                metadata,
                 folder_type,
             }))
         }
-        "TrashFolder" => {
-            // TrashFolder is handled separately; return as Folder for now
-            let children = raw
-                .children
-                .map(|c| {
-                    c.items
-                        .into_iter()
-                        .map(convert_binder_item)
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
-
-            Ok(BinderItem::Folder(Folder {
-                uuid,
-                title,
-                children,
-                metadata,
-                folder_type: FolderType::TrashFolder,
-            }))
-        }
-        other => Err(ScrivenerError::ScrivxParseError {
-            message: format!("Unknown BinderItem type: '{}'", other),
-        }),
+        item_type => Ok(BinderItem::Document(Document {
+            uuid,
+            title,
+            children,
+            doc_type: item_type.to_string(),
+            synopsis: None,
+            notes: None,
+            keywords,
+            content: DocumentContent::new(),
+            metadata,
+        })),
     }
 }
 
@@ -399,7 +378,7 @@ fn binder_item_to_raw(item: &BinderItem) -> RawBinderItemOut {
     match item {
         BinderItem::Document(doc) => RawBinderItemOut {
             uuid: doc.uuid.to_string().to_uppercase(),
-            item_type: "Text".to_string(),
+            item_type: doc.doc_type.clone(),
             created: format_datetime(&doc.metadata.created),
             modified: format_datetime(&doc.metadata.modified),
             title: doc.title.clone(),
@@ -433,7 +412,13 @@ fn binder_item_to_raw(item: &BinderItem) -> RawBinderItemOut {
                     })
                 },
             }),
-            children: None,
+            children: if doc.children.is_empty() {
+                None
+            } else {
+                Some(RawChildrenOut {
+                    items: doc.children.iter().map(binder_item_to_raw).collect(),
+                })
+            },
         },
         BinderItem::Folder(folder) => {
             let children: Vec<RawBinderItemOut> =
@@ -452,8 +437,28 @@ fn binder_item_to_raw(item: &BinderItem) -> RawBinderItemOut {
                         "No"
                     }
                     .to_string(),
-                    keywords: None,
-                    custom_metadata: None,
+                    keywords: if folder.keywords.is_empty() {
+                        None
+                    } else {
+                        Some(RawKeywordsOut {
+                            keywords: folder.keywords.clone(),
+                        })
+                    },
+                    custom_metadata: if folder.metadata.custom_metadata.is_empty() {
+                        None
+                    } else {
+                        Some(RawCustomMetaDataOut {
+                            items: folder
+                                .metadata
+                                .custom_metadata
+                                .iter()
+                                .map(|(k, v)| RawMetaDataItemOut {
+                                    field_id: k.clone(),
+                                    value: v.clone(),
+                                })
+                                .collect(),
+                        })
+                    },
                 }),
                 children: if children.is_empty() {
                     None
@@ -477,8 +482,7 @@ pub fn serialize_scrivx(
     metadata: &ProjectMetadata,
     trash: &Trash,
 ) -> Result<String> {
-    let mut all_items: Vec<RawBinderItemOut> =
-        binder.root.iter().map(binder_item_to_raw).collect();
+    let mut all_items: Vec<RawBinderItemOut> = binder.root.iter().map(binder_item_to_raw).collect();
 
     // Add trash folder (always include it if there's a UUID, even if empty)
     {
@@ -517,18 +521,19 @@ pub fn serialize_scrivx(
         },
     };
 
-    let xml = quick_xml::se::to_string(&project)
-        .map_err(|e| ScrivenerError::ScrivxParseError {
-            message: format!("XML serialization failed: {}", e),
-        })?;
+    let xml = quick_xml::se::to_string(&project).map_err(|e| ScrivenerError::ScrivxParseError {
+        message: format!("XML serialization failed: {}", e),
+    })?;
 
-    Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}", xml))
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
+        xml
+    ))
 }
 
 /// Serialize only the `<Binder>...</Binder>` section as an XML string.
 fn serialize_binder_xml(binder: &Binder, trash: &Trash) -> Result<String> {
-    let mut all_items: Vec<RawBinderItemOut> =
-        binder.root.iter().map(binder_item_to_raw).collect();
+    let mut all_items: Vec<RawBinderItemOut> = binder.root.iter().map(binder_item_to_raw).collect();
 
     // Add trash folder
     {
@@ -558,9 +563,10 @@ fn serialize_binder_xml(binder: &Binder, trash: &Trash) -> Result<String> {
     }
 
     let binder_out = RawBinderOut { items: all_items };
-    let xml = quick_xml::se::to_string(&binder_out).map_err(|e| ScrivenerError::ScrivxParseError {
-        message: format!("Binder XML serialization failed: {}", e),
-    })?;
+    let xml =
+        quick_xml::se::to_string(&binder_out).map_err(|e| ScrivenerError::ScrivxParseError {
+            message: format!("Binder XML serialization failed: {}", e),
+        })?;
     Ok(xml)
 }
 
@@ -582,11 +588,12 @@ pub(crate) fn serialize_scrivx_preserving(
         })?;
 
     let binder_end_tag = "</Binder>";
-    let binder_end = raw_xml
-        .find(binder_end_tag)
-        .ok_or_else(|| ScrivenerError::ScrivxParseError {
-            message: "Could not find </Binder> tag in raw XML".into(),
-        })?;
+    let binder_end =
+        raw_xml
+            .find(binder_end_tag)
+            .ok_or_else(|| ScrivenerError::ScrivxParseError {
+                message: "Could not find </Binder> tag in raw XML".into(),
+            })?;
     let binder_end = binder_end + binder_end_tag.len();
 
     // Build the replacement: splice the new binder XML into the original
@@ -666,6 +673,92 @@ mod tests {
     }
 
     #[test]
+    fn document_children_and_unknown_types_roundtrip() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ScrivenerProject Identifier="test" Version="2.0">
+  <Binder>
+    <BinderItem UUID="AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" Type="DraftFolder">
+      <Title>Draft</Title>
+      <Children>
+        <BinderItem UUID="11111111-1111-1111-1111-111111111111" Type="Text">
+          <Title>Parent Document</Title>
+          <Children>
+            <BinderItem UUID="22222222-2222-2222-2222-222222222222" Type="Image">
+              <Title>Image Child</Title>
+            </BinderItem>
+            <BinderItem UUID="33333333-3333-3333-3333-333333333333" Type="WebArchive">
+              <Title>Web Child</Title>
+            </BinderItem>
+          </Children>
+        </BinderItem>
+      </Children>
+    </BinderItem>
+    <BinderItem UUID="CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC" Type="TrashFolder">
+      <Title>Trash</Title>
+    </BinderItem>
+  </Binder>
+</ScrivenerProject>"#;
+
+        let (binder, _, trash) = parse_scrivx_str(xml).unwrap();
+        let parent_uuid = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let parent = binder.find_by_uuid(parent_uuid).unwrap();
+        assert_eq!(parent.children().len(), 2);
+        assert_eq!(parent.children()[0].item_type(), "Image");
+        assert_eq!(parent.children()[1].item_type(), "WebArchive");
+
+        let serialized = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
+        assert!(serialized.contains("Type=\"Image\""));
+        assert!(serialized.contains("Type=\"WebArchive\""));
+
+        let (reopened, _, _) = parse_scrivx_str(&serialized).unwrap();
+        let reopened_parent = reopened.find_by_uuid(parent_uuid).unwrap();
+        assert_eq!(reopened_parent.children().len(), 2);
+        assert_eq!(
+            reopened.flatten()[3].1,
+            vec!["Draft", "Parent Document", "Web Child"]
+        );
+    }
+
+    #[test]
+    fn folder_keywords_and_custom_metadata_roundtrip() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ScrivenerProject Identifier="test" Version="2.0">
+  <Binder>
+    <BinderItem UUID="AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" Type="DraftFolder">
+      <Title>Draft</Title>
+      <MetaData>
+        <IncludeInCompile>Yes</IncludeInCompile>
+        <Keywords><Keyword>folder-keyword</Keyword></Keywords>
+        <CustomMetaData>
+          <MetaDataItem><FieldID>Status</FieldID><Value>Drafting</Value></MetaDataItem>
+        </CustomMetaData>
+      </MetaData>
+    </BinderItem>
+    <BinderItem UUID="CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC" Type="TrashFolder">
+      <Title>Trash</Title>
+    </BinderItem>
+  </Binder>
+</ScrivenerProject>"#;
+
+        let (binder, _, trash) = parse_scrivx_str(xml).unwrap();
+        let folder = &binder.root[0];
+        assert_eq!(folder.keywords(), &["folder-keyword"]);
+        assert_eq!(
+            folder.metadata().custom_metadata.get("Status"),
+            Some(&"Drafting".to_string())
+        );
+
+        let serialized = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
+        let (reopened, _, _) = parse_scrivx_str(&serialized).unwrap();
+        let folder = &reopened.root[0];
+        assert_eq!(folder.keywords(), &["folder-keyword"]);
+        assert_eq!(
+            folder.metadata().custom_metadata.get("Status"),
+            Some(&"Drafting".to_string())
+        );
+    }
+
+    #[test]
     fn parse_full_scrivx_str() {
         let xml = include_str!("../tests/fixtures/sample.scriv/sample.scrivx");
         let (binder, metadata, trash) = parse_scrivx_str(xml).unwrap();
@@ -731,12 +824,24 @@ mod tests {
         let result = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
 
         // The non-binder sections must be preserved
-        assert!(result.contains("Creator=\"14.3 (3192073)\""), "Creator attribute lost");
-        assert!(result.contains("Device=\"JiayunMBP\""), "Device attribute lost");
+        assert!(
+            result.contains("Creator=\"14.3 (3192073)\""),
+            "Creator attribute lost"
+        );
+        assert!(
+            result.contains("Device=\"JiayunMBP\""),
+            "Device attribute lost"
+        );
         assert!(result.contains("ModID=\"A1B2C3\""), "ModID attribute lost");
         assert!(result.contains("<Collections>"), "Collections section lost");
-        assert!(result.contains("<PrintSettings>"), "PrintSettings section lost");
-        assert!(result.contains("<PaperSize>612.0, 792.0</PaperSize>"), "PaperSize lost");
+        assert!(
+            result.contains("<PrintSettings>"),
+            "PrintSettings section lost"
+        );
+        assert!(
+            result.contains("<PaperSize>612.0, 792.0</PaperSize>"),
+            "PaperSize lost"
+        );
 
         // The binder should still be parseable
         let (binder2, _, _) = parse_scrivx_str(&result).unwrap();
@@ -773,9 +878,18 @@ mod tests {
         let result = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
 
         // DraftFolder and ResearchFolder types must be in the output
-        assert!(result.contains("Type=\"DraftFolder\""), "DraftFolder type lost in serialized binder");
-        assert!(result.contains("Type=\"ResearchFolder\""), "ResearchFolder type lost in serialized binder");
-        assert!(result.contains("Type=\"TrashFolder\""), "TrashFolder type lost in serialized binder");
+        assert!(
+            result.contains("Type=\"DraftFolder\""),
+            "DraftFolder type lost in serialized binder"
+        );
+        assert!(
+            result.contains("Type=\"ResearchFolder\""),
+            "ResearchFolder type lost in serialized binder"
+        );
+        assert!(
+            result.contains("Type=\"TrashFolder\""),
+            "TrashFolder type lost in serialized binder"
+        );
     }
 
     #[test]
