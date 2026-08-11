@@ -13,6 +13,7 @@ A Rust library for reading and writing [Scrivener 3](https://www.literatureandla
 - **Binder navigation** — traverse children of any binder item, find items by UUID or title, flatten the tree with paths
 - **Move items** — reorganize documents and folders under either document or folder parents with cycle protection
 - **Lossless binder round-tripping** — preserve document children, original item types, and unmodeled Scrivener XML such as `TextSettings`
+- **Compile-state fidelity** — treat Scrivener's omitted `IncludeInCompile` element as excluded and preserve the omitted form on save
 - **RTF content** — read and write document or folder content, notes, and synopses with plain text extraction (via [`scrivener-rtf`](https://crates.io/crates/scrivener-rtf))
 - **Full-text search** — plain text search, regex search, and keyword-based filtering
 - **Statistics** — word counts, character counts, per-document breakdowns
@@ -73,6 +74,9 @@ into the original XML by UUID, preserving unmodeled Scrivener-owned fields such
 as `TextSettings` and extension attributes. As a result, the public `Document`
 and `Folder` structs gained fields. Code that constructs either type should use
 `..Default::default()` so it continues to compile as the model evolves.
+
+Version 0.2.2 recognizes Scrivener 3's normalized compile-state convention:
+an omitted `IncludeInCompile` element is excluded rather than included.
 
 ## License
 

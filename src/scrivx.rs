@@ -226,7 +226,7 @@ fn convert_metadata(raw: &RawBinderItem) -> DocumentMetadata {
         .as_ref()
         .and_then(|m| m.include_in_compile.as_deref())
         .map(|v| v == "Yes")
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let custom_metadata = raw
         .metadata
@@ -589,17 +589,22 @@ fn metadata_to_element(item: &BinderItem, existing: Option<&Element>) -> Element
     let keywords_existing = child_element(&old_children, "Keywords").cloned();
     let custom_existing = child_element(&old_children, "CustomMetaData").cloned();
 
-    let mut include = include_existing.unwrap_or_else(|| Element::new("IncludeInCompile"));
-    set_element_text(
-        &mut include,
-        if item.metadata().include_in_compile {
-            "Yes"
-        } else {
-            "No"
-        },
-    );
-
-    let mut children = vec![XMLNode::Element(include)];
+    // Scrivener 3 commonly represents an excluded item by omitting
+    // IncludeInCompile entirely. Preserve that form when it already exists,
+    // while still writing an explicit value when the element was present.
+    let mut children = Vec::new();
+    if include_existing.is_some() || item.metadata().include_in_compile {
+        let mut include = include_existing.unwrap_or_else(|| Element::new("IncludeInCompile"));
+        set_element_text(
+            &mut include,
+            if item.metadata().include_in_compile {
+                "Yes"
+            } else {
+                "No"
+            },
+        );
+        children.push(XMLNode::Element(include));
+    }
     children.extend(old_children.into_iter().filter(|node| {
         !matches!(
             node,
@@ -990,6 +995,50 @@ mod tests {
 
         let item = convert_binder_item(raw).unwrap();
         assert!(matches!(item, BinderItem::Document(_)));
+    }
+
+    #[test]
+    fn missing_include_in_compile_means_excluded_and_stays_omitted() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ScrivenerProject Identifier="test" Version="2.0">
+  <Binder>
+    <BinderItem UUID="AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" Type="DraftFolder">
+      <Title>Draft</Title>
+      <MetaData><IncludeInCompile>Yes</IncludeInCompile></MetaData>
+      <Children>
+        <BinderItem UUID="11111111-1111-1111-1111-111111111111" Type="Text">
+          <Title>00｜章節大綱（不編譯）</Title>
+          <MetaData/>
+          <TextSettings><TextSelection>3,4</TextSelection></TextSettings>
+        </BinderItem>
+      </Children>
+    </BinderItem>
+    <BinderItem UUID="CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC" Type="TrashFolder">
+      <Title>Trash</Title>
+      <MetaData/>
+    </BinderItem>
+  </Binder>
+</ScrivenerProject>"#;
+
+        let (binder, _, trash) = parse_scrivx_str(xml).unwrap();
+        let outline_uuid = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        assert!(
+            !binder
+                .find_by_uuid(outline_uuid)
+                .unwrap()
+                .metadata()
+                .include_in_compile
+        );
+
+        let serialized = serialize_scrivx_preserving(xml, &binder, &trash).unwrap();
+        let root = Element::parse(serialized.as_bytes()).unwrap();
+        let outline = find_xml_item(root.get_child("Binder").unwrap(), outline_uuid).unwrap();
+        assert!(outline
+            .get_child("MetaData")
+            .unwrap()
+            .get_child("IncludeInCompile")
+            .is_none());
+        assert!(outline.get_child("TextSettings").is_some());
     }
 
     #[test]
